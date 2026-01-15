@@ -1,0 +1,510 @@
+CREATE MULTISET VOLATILE TABLE retail_rep AS
+(
+SEL * FROM EMPLOYEE_CONTRACTOR_hist_V
+WHERE exp_dt >= 1241001
+) WITH DATA 
+PRIMARY INDEX ( EMP_ID )
+PARTITION BY Range_N(EXP_DT  BETWEEN DATE '2004-01-01' AND DATE '2025-12-31' EACH INTERVAL '1' MONTH ,
+ NO RANGE OR UNKNOWN)
+ ON COMMIT PRESERVE ROWS 
+ ;
+
+/* *************** ERROR HANDLING ************ */
+.IF Errorcode <> 0 THEN .QUIT Errorcode;
+
+--SEL * FROM opv
+
+CREATE MULTISET VOLATILE TABLE opv AS  --account level to identify if there is pin out generate
+(
+SELECT DISTINCT
+CUST_ID,
+ACCT_NUM,
+EVENT_TYPE,
+SEGMENT_TYPE,
+SEGMENT_NM_1,
+SEGMENT_NM_2,
+EVENT_DT,
+MATCH_IND,
+SOURCE_ID,
+LOAD_FREQ_IND
+FROM ADBCMP_PRD_ALLVM.OMNI_PAGE_CUSTS_DLY_HIST_V 
+WHERE 1=1
+AND source_id = 'retail'
+AND match_ind = 'C'
+AND segment_nm_1 = 'Transfer PIN Generators'
+AND event_dt BETWEEN 1250801 AND 1250831 --?start_dt  AND  ?end_dt
+--AND cust_id = '986570746'
+) WITH DATA 
+PRIMARY INDEX (CUST_ID,ACCT_NUM,EVENT_DT)
+ON COMMIT PRESERVE ROWS
+;
+
+
+/*SEL * FROM pv
+WHERE cust_id = '486049554'*/
+
+CREATE MULTISET VOLATILE TABLE pv AS -----get line and MTN level
+(
+SEL * FROM VZWEB_PRD_ALLVM.DIGITAL_PAGE_VIEW_VCG_V  AS a
+WHERE 1=1
+AND LOB_SERVICE_TYPE_DESC = 'VZW' 
+AND display_chnl_cd = 'Retail'
+AND EVENT_DT BETWEEN 1251001 AND 1251031--?start_dt AND ?end_dt 
+AND cust_id IS NOT NULL AND  store_num IS NOT NULL AND NETACE_USER_ID IS NOT NULL 
+AND SRC_CHNL_CD = 'POS'
+--AND (CUST_LINE_SEQ_ID IS NOT NULL OR MTN IS NOT NULL) 
+--AND mtn <>'null' AND mtn <> 'undefined'
+AND EXISTS (SELECT 1 FROM opv WHERE opv.cust_id = a.cust_id)
+--AND cust_id = '986570746'
+) WITH DATA
+PRIMARY INDEX(CUST_ID,ACCT_NUM,EVENT_DT,VISITOR_ID ,SESSION_ID)
+ON COMMIT PRESERVE ROWS
+;
+
+/*DROP TABLE msm;
+
+--SEL * FROM msm
+
+CREATE MULTISET VOLATILE TABLE msm AS ---find port out pin from msm table
+(
+SEL DISTINCT
+cust_id
+,acct_num
+,mtn
+,Cast(delivery_ts AS DATE) AS delivery_ts
+FROM  TP_OM_SMS_HIST_V 
+WHERE 1=1
+AND request_type LIKE 'PortOutTransferPIN_Notif'
+AND Cast(delivery_ts AS DATE) BETWEEN 1250901 AND 1250930 --?start_dt AND ?end_dt 
+--AND CUST_ID  ='986570746'
+) WITH DATA
+PRIMARY INDEX (delivery_ts, cust_id, acct_num, mtn)
+ON COMMIT PRESERVE ROWS
+;*/
+
+
+
+/*SELECT * FROM pv_2
+WHERE cust_id = '486049554'*/
+
+CREATE MULTISET VOLATILE TABLE pv_2 AS --to get first user and store for each event date if there is transfer pin on page_nm
+(
+SEL DISTINCT
+pv.cust_id
+,pv.acct_num
+,Coalesce(pv.CUST_LINE_SEQ_ID, b.CUST_LINE_SEQ_ID) AS CUST_LINE_SEQ_ID
+,Coalesce(pv.mtn, a.MTN) AS mtn
+,event_dt
+,Min(pv.store_num) AS store_num
+,Min(pv.NETACE_USER_ID) AS NETACE_USER_ID
+FROM pv
+INNER JOIN OUTLET_HIST_V  AS o
+ON pv.STORE_NUM = o.store_num 
+AND pv.event_dt BETWEEN o.eff_dt AND o.EXP_DT
+AND o.site_status <>'Closed'
+AND o.SLS_DIST_CHNL_TYPE_CD IN ('m')
+INNER JOIN retail_rep AS c
+ON pv.netace_user_id = c.nt_user_id 
+AND pv.event_dt BETWEEN c.eff_dt AND c.exp_dt
+AND c.DEPT_DESC LIKE 'MKT-Communication Stores A%' 
+AND c.emp_status_ind <>'T'
+LEFT JOIN CUST_ACCT_LINE_V AS a
+ON pv.cust_id = a.CUST_ID
+AND pv.acct_num = a.ACCT_NUM
+AND pv.cust_line_seq_id = a.CUST_LINE_SEQ_ID
+LEFT JOIN CUST_ACCT_LINE_V AS b
+ON pv.cust_id = b.CUST_ID
+AND pv.acct_num = b.ACCT_NUM
+AND pv.mtn = b.mtn
+WHERE 1=1
+AND pv.cust_id IS NOT NULL AND pv.store_num IS NOT NULL AND pv.NETACE_USER_ID IS NOT NULL 
+--AND (pv.CUST_LINE_SEQ_ID IS NOT NULL OR pv.MTN IS NOT NULL)  ---at least have one available to find other one
+--AND pv.mtn <>'undefined' AND pv.mtn <>'null'
+AND page_nm LIKE '%transfer pin%'
+--AND pv.cust_id = '986570746'
+GROUP BY 1,2,3,4,5
+) WITH DATA 
+PRIMARY INDEX(CUST_ID,ACCT_NUM,EVENT_DT,mtn ,CUST_LINE_SEQ_ID)
+ON COMMIT PRESERVE ROWS
+;
+
+
+CREATE MULTISET VOLATILE TABLE port_out_1 AS (   -- this part is find possible match between  account level port-out pin and line level port out 
+SELECT DISTINCT
+opv.CUST_ID,
+opv.ACCT_NUM,
+opv.EVENT_TYPE,
+opv.SEGMENT_TYPE,
+opv.SEGMENT_NM_1,
+opv.SEGMENT_NM_2,
+opv.EVENT_DT,
+opv.MATCH_IND,
+opv.SOURCE_ID,
+opv.LOAD_FREQ_IND,
+Coalesce(pv_2.CUST_LINE_SEQ_ID, 'account level pin transfer') AS CUST_LINE_SEQ_ID,
+Coalesce(pv_2.mtn, 'account level pin transfer') AS mtn,
+pv_2.STORE_NUM AS STORE_NUM,
+pv_2.NETACE_USER_ID AS NETACE_USER_ID
+
+--Coalesce(pv_2.CUST_LINE_SEQ_ID, pv_1_1.CUST_LINE_SEQ_ID) AS CUST_LINE_SEQ_ID,
+--Coalesce(pv_2.mtn, pv_1_1.mtn) AS mtn,
+--Coalesce(pv_2.STORE_NUM, pv_1_1.STORE_NUM) AS STORE_NUM,
+--Coalesce(pv_2.NETACE_USER_ID, pv_1_1.NETACE_USER_ID) AS NETACE_USER_ID
+FROM opv 
+LEFT JOIN pv_2 
+ON opv.cust_id = pv_2.cust_id
+AND opv.acct_num = pv_2.acct_num
+AND opv.event_dt = pv_2.event_dt
+WHERE 1=1
+AND pv_2.STORE_NUM IS NOT NULL AND pv_2.NETACE_USER_ID IS NOT NULL -- to make sure only include retail channel store and retail reps
+--opv.cust_id = '986570746'
+) WITH DATA 
+PRIMARY INDEX(CUST_ID,ACCT_NUM,EVENT_DT,mtn,CUST_LINE_SEQ_ID, NETACE_USER_ID, STORE_NUM)
+ON COMMIT PRESERVE ROWS
+;
+
+
+/*SEL * FROM port_out_all 
+WHERE CUST_ID = '365768949'*/
+
+CREATE MULTISET VOLATILE TABLE port_out_all AS (
+SEL DISTINCT   
+a.CUST_ID
+,a.ACCT_NUM
+,a.EVENT_DT
+,a.CUST_LINE_SEQ_ID
+,a.mtn
+,a.STORE_NUM
+,a.NETACE_USER_ID
+FROM port_out_1 AS a
+) WITH DATA
+PRIMARY INDEX (CUST_ID,ACCT_NUM,EVENT_DT,mtn,CUST_LINE_SEQ_ID, NETACE_USER_ID, STORE_NUM)
+ON COMMIT PRESERVE ROWS
+;
+
+--DROP TABLE  ntl_prd_qmtbls.rmc_retail_port_pin_store_test;
+
+DELETE FROM ntl_prd_qmtbls.rmc_retail_port_pin_request
+WHERE Td_Month_Begin(event_dt) = 1251001 --?start_dt
+;
+
+--CREATE MULTISET TABLE ntl_prd_qmtbls.rmc_retail_port_pin_request AS (
+--INSERT INTO ntl_prd_qmtbls.rmc_retail_port_pin_store_test
+INSERT INTO ntl_prd_qmtbls.rmc_retail_port_pin_request
+SELECT * FROM port_out_all
+--) WITH DATA 
+--PRIMARY INDEX (CUST_ID,ACCT_NUM,EVENT_DT,mtn,CUST_LINE_SEQ_ID, NETACE_USER_ID, STORE_NUM)
+;
+
+
+/**** add port_out info****/
+
+/*SEL * FROM ntl_prd_qmtbls.rmc_retail_port_pin_request
+WHERE cust_id = '473769196'*/
+
+CREATE MULTISET VOLATILE TABLE transfer_pin_port_out AS  (
+SEL DISTINCT
+Td_Month_Begin(a.event_dt) AS rpt_dt
+,a.event_dt
+,a.cust_id
+,a.acct_num
+,a.cust_line_seq_id
+,a.mtn
+,a.NETACE_USER_ID
+,Coalesce(rep.nm_first || ' '|| rep.nm_last, 'Unknown') AS transfer_pin_rep
+,Coalesce(hier.STORE_NUM, 'Unknown') AS STORE_NUM
+,Coalesce(hier.sls_outlet_nm, 'Unknown') AS sls_outlet_nm
+,Coalesce(hier.DISTRICT_DESC, 'Unknown') AS DISTRICT_DESC
+,Coalesce(hier.TERRITORY_DESC, 'Unknown') AS TERRITORY_DESC
+,Coalesce(hier.VZ2_REGION_DESC,'Unknown') AS VZ2_REGION_DESC
+,b.ACTIVITY_CD
+,b.activity_dt
+,c.BI_CARRIER_TYPE_DESC
+FROM ntl_prd_qmtbls.rmc_retail_port_pin_request AS a
+--FROM ntl_prd_qmtbls.rmc_retail_port_pin_store_test AS a
+LEFT JOIN NTL_PRD_ALLVM.PORT_SUM_FACT_V AS b
+ON a.cust_id = b.CUST_ID
+AND b.ACTIVITY_CD NOT IN ('PI', 'WB')
+AND a.cust_line_seq_id = b.CUST_LINE_SEQ_ID
+AND a.mtn = b.mtn
+AND b.activity_dt BETWEEN  a.event_dt AND a.event_dt + INTERVAL '7' DAY
+LEFT  JOIN NTL_PRD_ALLVM.CARRIER_V AS C 
+ON b.PORT_CARRIER_CD = C.CARRIER_CD
+LEFT JOIN NTL_PRD_QMTBLS.ORD_RETAIL_RM_STORE_DS AS hier
+ON a.store_num  = hier.store_num
+AND hier.audit_month = Td_Month_Begin(a.event_dt)
+LEFT JOIN retail_rep AS rep
+ON rep.nt_user_id  = a.netace_user_id
+AND a.event_dt BETWEEN rep.eff_dt AND rep.exp_dt
+AND EMP_STATUS_IND <>'T'
+WHERE Td_Month_Begin(a.event_dt) = 1251001 --?start_dt
+) WITH DATA
+PRIMARY INDEX(CUST_ID,ACCT_NUM,EVENT_DT,mtn,CUST_LINE_SEQ_ID, NETACE_USER_ID, STORE_NUM)
+INDEX(cust_id)
+INDEX(acct_num)
+INDEX(cust_line_seq_id)
+INDEX(mtn)
+INDEX(STORE_NUM)
+INDEX(EVENT_DT)
+ON COMMIT PRESERVE ROWS
+;
+
+CREATE MULTISET VOLATILE TABLE offer AS
+(
+SELECT DISTINCT
+SESSION_DT
+,cust_id
+,acct_num
+--,CUST_LINE_SEQ_ID
+--,MTN
+,location_id
+,b.STORE_NUM
+,b.sls_outlet_nm
+,DEVICE_TYPE
+,offer_description
+,PROP_CD
+--,c.emp_id
+,RESP
+,Trigger_Prov45_Ind
+,Triggered_Prov45_Ind
+,rep.nt_user_id
+,Coalesce(rep.NM_FIRST || ' ' || rep.NM_LAST, 'Unknown') AS rep_offer
+--,offer_tm
+--,Rank() Over (PARTITION BY SESSION_DT,cust_id,acct_num, store_num, offer_description ORDER BY  offer_tm DESC) 
+FROM UDM_PRDUSR_ALLVM.CRM_RTD_ACTIVITY_V AS c
+INNER JOIN NTL_PRD_QMTBLS.ORD_RETAIL_RM_STORE_DS AS b
+ON c.location_id  = b.sls_outlet_id
+AND b.audit_month = Td_Month_Begin( c.SESSION_DT)
+LEFT JOIN retail_rep AS rep
+ON rep.emp_id = c.emp_id
+AND c.SESSION_DT BETWEEN rep.eff_dt AND rep.exp_dt
+
+QUALIFY Rank() Over (PARTITION BY SESSION_DT,cust_id,acct_num, store_num, offer_description ORDER BY  offer_tm DESC)  = 1
+
+WHERE  Td_Month_Begin( SESSION_DT) =1251001 --?start_dt 
+AND CONSUMER_IND =  'CONSUMER' 
+AND PROP_CD IS NOT NULL
+AND  PROP_CD NOT IN ('PR_4242','PR_4235','PR_4361','PR_4360','PR_4550','NS_4551')
+AND channel = 'Retail'
+AND device_type IS NOT NULL
+AND Left(PROP_CD,3) <> 'AU_' 
+AND OFFER_DESCRIPTION IS NOT NULL
+AND OFFER_DESCRIPTION NOT LIKE '%test%' 
+AND Upper(DEVICE_TYPE) IN ('BASIC','SMARTPHONE') 
+--AND (RESP = 'Accepted' OR (Trigger_Prov45_Ind = 'Y' OR Triggered_Prov45_Ind = 'Y'))
+AND PROP_CD IN ( 'PR_4223','PR_5126','PR_5089','PR_5088','PR_4897','PR_4894','PR_4891','PR_4878','PR_4796','PR_4795','PR_5124','PR_5123', 'PR_4955', 'PR_5244', 'PR_5538', 'PR_5588' )
+--AND cust_id = '471696071'
+
+)WITH DATA
+PRIMARY INDEX ( location_id,cust_id,SESSION_DT )
+INDEX(location_id)
+INDEX(cust_id)
+ON COMMIT PRESERVE ROWS 
+;
+
+--DROP TABLE ntl_prd_qmtbls.transfer_port_out_offer_detail;
+
+DELETE FROM ntl_prd_qmtbls.transfer_port_out_offer_detail
+WHERE rpt_dt = 1251001
+;
+
+---DROP TABLE ntl_prd_qmtbls.transfer_port_out_offer_detail;
+
+--CREATE MULTISET  TABLE ntl_prd_qmtbls.transfer_port_out_offer_detail AS (
+INSERT INTO ntl_prd_qmtbls.transfer_port_out_offer_detail
+SEL DISTINCT
+a.rpt_dt
+,a.EVENT_DT AS pin_request_dt
+,b.SESSION_DT AS offer_dt
+,a.CUST_ID
+,a.ACCT_NUM
+--,a.CUST_LINE_SEQ_ID
+--,a.mtn
+,a.NETACE_USER_ID
+,a.transfer_pin_rep
+,a.STORE_NUM  AS STORE_NUM
+,Coalesce(a.SLS_OUTLET_NM, 'Unknown') AS SLS_OUTLET_NM
+,Coalesce(a.DISTRICT_DESC, 'Unknown') AS DISTRICT_DESC
+,Coalesce(a.territory_desc, 'Unknown') AS Territory_DESC
+,Coalesce(a.VZ2_REGION_DESC, 'Unknown') AS  MARKET
+,a.ACTIVITY_CD
+,a.ACTIVITY_DT AS port_out_dt
+,a.BI_CARRIER_TYPE_DESC
+,Coalesce(b.offer_description, 'no offer found') AS offer_description
+,CASE WHEN Trigger_Prov45_Ind = 'Y' OR Triggered_Prov45_Ind ='Y' THEN 'Yes' ELSE 'No' END AS provision_ind
+,Max(b.RESP) AS resp
+FROM transfer_pin_port_out AS a
+LEFT JOIN offer AS b
+ON a.event_dt = b.SESSION_DT
+AND a.cust_id = b.cust_id
+AND a.acct_num = b.acct_num
+--AND a.cust_line_seq_id = b.cust_line_seq_id
+--AND a.mtn = b.mtn
+WHERE a.rpt_dt = 1251001
+GROUP BY 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17
+--) WITH DATA 
+--PRIMARY INDEX (CUST_ID,ACCT_NUM,pin_request_dt, NETACE_USER_ID, STORE_NUM)
+;
+
+
+CREATE MULTISET VOLATILE TABLE  pin_cnt AS (
+SEL
+Td_Month_Begin(pin_request_dt) AS  rpt_dt
+,CUST_ID
+,ACCT_NUM
+,STORE_NUM
+,Sum(pin_cnt) AS pin_cnt
+FROM (
+SEL DISTINCT
+CUST_ID
+,ACCT_NUM
+,STORE_NUM
+,pin_request_dt
+,1 AS pin_cnt
+--,1 AS pin_cnt
+FROM ntl_prd_qmtbls.transfer_port_out_offer_detail
+WHERE rpt_dt = 1251001
+--AND cust_id = '925967825'
+) a
+GROUP BY 1,2,3,4
+) WITH DATA
+PRIMARY INDEX(rpt_dt,CUST_ID,ACCT_NUM,STORE_NUM)
+ON COMMIT PRESERVE ROWS
+;
+
+CREATE MULTISET VOLATILE TABLE offer_provision_cnt AS (
+SEL
+rpt_dt
+,CUST_ID
+,ACCT_NUM
+,STORE_NUM
+,Sum(offer_cnt) AS offer_cnt
+,Sum(provision_cnt) AS provision_cnt
+FROM (
+SEL 
+rpt_dt
+,offer_dt
+,STORE_NUM
+,CUST_ID
+,ACCT_NUM
+,Count(DISTINCT CASE WHEN resp = 'Accepted' THEN CUST_ID ELSE NULL END ) AS offer_cnt
+,Count(DISTINCT CASE WHEN (provision_ind = 'Yes') THEN CUST_ID ELSE NULL END ) AS provision_cnt
+FROM ntl_prd_qmtbls.transfer_port_out_offer_detail 
+WHERE rpt_dt = 1251001
+GROUP BY  1,2,3,4,5
+) a
+--WHERE cust_id = '925967825'
+GROUP BY 1,2,3,4
+) WITH DATA
+PRIMARY INDEX(rpt_dt,CUST_ID,ACCT_NUM,STORE_NUM)
+ON COMMIT PRESERVE ROWS
+;
+
+
+CREATE MULTISET VOLATILE TABLE port_out_cnt AS (
+SEL
+rpt_dt
+,CUST_ID
+,ACCT_NUM
+,STORE_NUM
+,Sum(port_out_cnt) AS port_out_cnt
+FROM (
+SEL
+rpt_dt
+,pin_request_dt
+,STORE_NUM
+,CUST_ID
+,ACCT_NUM
+,Count(DISTINCT CASE WHEN port_out_dt IS NOT NULL THEN cust_id ELSE NULL END ) AS port_out_cnt
+FROM ntl_prd_qmtbls.transfer_port_out_offer_detail 
+WHERE rpt_dt = 1251001
+GROUP BY 1,2,3,4,5
+) a
+--WHERE cust_id = '925967825'
+GROUP BY 1,2,3,4
+) WITH DATA
+PRIMARY INDEX(rpt_dt,CUST_ID,ACCT_NUM,STORE_NUM)
+ON COMMIT PRESERVE ROWS
+;
+
+DELETE FROM ntl_prd_qmtbls.transfer_port_out_offer_summary
+WHERE rpt_dt = 1251001
+;
+
+
+--CREATE MULTISET TABLE ntl_prd_qmtbls.transfer_port_out_offer_summary AS (
+INSERT INTO ntl_prd_qmtbls.transfer_port_out_offer_summary
+SEL DISTINCT
+a.rpt_dt
+,a.CUST_ID
+,a.ACCT_NUM
+,Coalesce(hier.VZ2_REGION_DESC, 'Unknown') AS market
+,Coalesce(hier.territory_desc, 'Unknown') AS territory
+,Coalesce(hier.DISTRICT_DESC, 'Unknown') AS district
+,Coalesce(hier.SLS_OUTLET_NM , 'Unknown') AS SLS_OUTLET_NM
+,Coalesce(a.STORE_NUM, 'Unknown') AS STORE_NUM
+,Coalesce(pin_cnt, 0) AS pin_cnt
+,Coalesce(offer_cnt,0) AS offer_cnt
+,Coalesce(provision_cnt, 0) AS provision_cnt
+,Coalesce(port_out_cnt,0) AS port_out_cnt
+FROM pin_cnt AS a
+LEFT JOIN offer_provision_cnt AS b
+ON a.rpt_dt = b.rpt_dt
+AND a.cust_id = b.cust_id
+AND a.acct_num = b.acct_num
+AND a.store_num = b.store_num
+LEFT JOIN port_out_cnt AS c
+ON a.rpt_dt = c.rpt_dt
+AND a.cust_id = c.cust_id
+AND a.acct_num = c.acct_num
+AND a.store_num = c.store_num
+LEFT JOIN NTL_PRD_QMTBLS.ORD_RETAIL_RM_STORE_DS AS hier
+ON a.store_num  = hier.store_num
+AND a.rpt_dt = hier.audit_month 
+--WHERE a.cust_id = '925967825'
+
+--)WITH DATA
+--PRIMARY INDEX(CUST_ID,ACCT_NUM, rpt_dt,STORE_NUM)
+;
+
+
+DROP TABLE opv;
+DROP TABLE pv;
+DROP TABLE pv_2;
+DROP TABLE port_out_1;
+DROP TABLE port_out_all;
+DROP TABLE transfer_pin_port_out;
+DROP TABLE offer;
+DROP TABLE pin_cnt;
+DROP TABLE offer_provision_cnt;
+DROP TABLE port_out_cnt;
+
+
+SEL
+rpt_dt
+,cust_id
+,ACCT_NUM
+,STORE_NUM
+--,CUST_LINE_SEQ_ID
+--,MTN
+--,pin_request_dt
+,Count(*)
+FROM ntl_prd_qmtbls.transfer_port_out_offer_summary
+--FROM ntl_prd_qmtbls.rmc_retail_port_pin_store_test
+--FROM ntl_prd_qmtbls.transfer_port_out_offer_detail
+GROUP BY 1,2,3,4
+HAVING Count(*) >1
+
+SEL * FROM ntl_prd_qmtbls.transfer_port_out_offer_summary
+WHERE 1=1
+--and rpt_dt =1250901
+AND  CUST_ID = '990167784'
+
+SEL * FROM  ntl_prd_qmtbls.transfer_port_out_offer_detail
+WHERE 1=1
+--and rpt_dt =1250901
+AND  CUST_ID  ='825832571'
+
+GRANT SELECT ON ntl_prd_qmtbls.transfer_port_out_offer_detail TO blansrh 
+
+
