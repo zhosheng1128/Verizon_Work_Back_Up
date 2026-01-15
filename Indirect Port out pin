@@ -1,0 +1,470 @@
+CREATE MULTISET VOLATILE TABLE opv AS   ----this is account level finding transfer pin from omni system
+(
+SELECT
+CUST_ID,
+ACCT_NUM,
+EVENT_TYPE,
+SEGMENT_TYPE,
+SEGMENT_NM_1,
+SEGMENT_NM_2,
+EVENT_DT,
+MATCH_IND,
+SOURCE_ID,
+LOAD_FREQ_IND		
+FROM ADBCMP_PRD_ALLVM.OMNI_PAGE_CUSTS_DLY_HIST_V 
+WHERE 1=1
+AND source_id <> 'retail'
+--AND match_ind = 'C'
+AND segment_nm_1 = 'Transfer PIN Generators'
+AND event_dt BETWEEN 1250801 AND 1250831 --?start_dt  AND  ?end_dt
+--AND cust_id = '926938949'
+
+) WITH DATA 
+PRIMARY INDEX (CUST_ID,ACCT_NUM,EVENT_DT)
+ON COMMIT PRESERVE ROWS;
+
+DROP TABLE ic;
+
+CREATE MULTISET VOLATILE TABLE ic AS  ---this is account level find transfer pin from Digital Link Click
+(
+SELECT DISTINCT
+cx.CUST_ID,
+cx.ACCT_NUM,
+lc.EVENT_DT
+FROM VZWEB_PRD_ALLVM.DIGITAL_LINK_CLICK_VCG_V AS lc
+
+INNER JOIN ADBCMP_PRD_ALLVM.OMNI_PAGE_MAP_V AS pm
+	ON  lc.PAGE_NM = pm.PAGE_NM
+	AND lc.LINK_NM = pm.LINK_NM
+	AND pm.EVENT_TYPE = 'pageview'
+	AND pm.MATCH_IND = 'C'
+	--AND pm.LOAD_FREQ_IND = 'I'
+	AND pm.segment_nm_1 = 'Transfer PIN Generators'
+	
+	INNER JOIN VZWEB_PRD_ALLVM.OMNI_CUST_SESSION_XREF_VCG_V AS cx
+	ON  lc.visitor_id = cx.visitor_id
+	AND lc.session_id = cx.session_id	
+	AND lc.event_dt = cx.event_dt
+	--AND cx.display_chnl_cd IN ('retail') -- Assisted channels only
+	--AND cx.SRC_CHNL_CD IN ('POS')
+	--AND cx.LOB_SERVICE_TYPE_DESC = 'VZW'
+	AND cx.EVENT_DT BETWEEN 1250801 AND 1250831  --?start_dt AND ?end_dt 
+	AND cx.CUST_ID IS NOT NULL
+	AND cx.ACCT_NUM IS NOT NULL
+		
+	WHERE 1=1
+	--and	lc.display_chnl_cd IN ('retail')
+	--AND lc.SRC_CHNL_CD IN ('POS')
+	AND lc.EVENT_DT BETWEEN 1250801 AND 1250831  --?start_dt AND ?end_dt 
+
+) WITH DATA
+PRIMARY INDEX (CUST_ID,ACCT_NUM,EVENT_DT)
+ON COMMIT PRESERVE ROWS
+;
+
+DROP TABLE acss;
+
+CREATE MULTISET VOLATILE TABLE acss AS ( --this is to find pin transfer from acss 
+SEL 
+*
+FROM  ntl_prd_allvm.acss_screen_usage_v
+WHERE 1=1
+AND acss_screen_nm IN ('Port_Out_TransferPIN','Port_Out_TransferPIN_NSA')
+AND acss_trans_dt BETWEEN 1250801 AND 1250831
+--AND cust_id = '926938949'
+) WITH DATA
+PRIMARY INDEX ( CUST_ID ,ACSS_SCREEN_NM ,ACSS_TRANS_DT ,ACSS_TRANS_TM ,ACSS_CALL_ID )
+PARTITION BY Range_N(ACSS_TRANS_DT  BETWEEN DATE '2010-01-01' AND DATE '2025-12-31' EACH INTERVAL '1' MONTH ,NO RANGE OR UNKNOWN)
+ON COMMIT PRESERVE ROWS;
+
+DROP TABLE pv;
+
+SEL
+a.*
+FROM(
+SEL 
+cust_id
+,acct_num
+,event_dt
+,Count(*) AS Cnt
+FROM pv
+GROUP BY 1,2,3
+)a
+WHERE a.Cnt>1
+
+SEL * FROM pv
+WHERE cust_id = '226566669'
+
+CREATE MULTISET VOLATILE TABLE pv AS (  ----find transfer pin event from account touch
+SELECT DISTINCT
+CUST_ID
+,ACCT_NUM
+,EVENT_DT
+,mtn
+,cust_line_seq_id
+,store_num
+--,PAGE_NM
+,NETACE_USER_ID 
+,SRC_CHNL_CD
+,event_tm
+FROM VZWEB_PRD_ALLVM.DIGITAL_PAGE_VIEW_VCG_V AS a
+
+QUALIFY Rank() Over (PARTITION BY cust_id, acct_num, event_dt ORDER BY event_tm ) = 1  ---if there are multiple users generate pin, pick the earliest one
+
+WHERE 1=1
+AND (PAGE_NM  LIKE '%transfer%pin%') 
+AND (cust_id IS NOT NULL AND  cust_id <>'NA' AND cust_id <> '${account}' AND cust_id <> '${accountHash}' AND cust_id <>'0')
+--AND EXISTS (SELECT 1 FROM opv WHERE  opv.cust_id = a.cust_id)
+AND event_dt BETWEEN 1250801 AND 1250831 
+--AND cust_id = '324685598'
+)WITH DATA
+PRIMARY INDEX ( CUST_ID, ACCT_NUM, EVENT_DT, store_num,mtn)
+ON COMMIT PRESERVE ROWS
+ ;
+ 
+ DROP TABLE combine; 
+ 
+ 
+CREATE MULTISET VOLATILE TABLE combine AS (   -- 426,314  combine OMNI_PAGE_CUSTS_DLY_HIST_V with DIGITAL_LINK_CLICK_VCG_V, and acss
+SEL DISTINCT  --514,633
+opv.cust_id
+,opv.acct_num
+,opv.event_dt
+,pv.NETACE_USER_ID
+,pv.store_num
+,pv.mtn
+,pv.cust_line_seq_id
+,pv.event_tm
+FROM opv
+LEFT JOIN pv
+ON opv.cust_id = pv.cust_id
+AND opv.event_dt = pv.event_dt
+AND opv.acct_num = pv.acct_num
+--WHERE opv.cust_id = '774286617'
+
+UNION 
+
+SEL DISTINCT  --90,612  (additional 5,670)
+ic.cust_id
+,ic.acct_num
+,ic.event_dt
+,pv.NETACE_USER_ID
+,pv.store_num
+,pv.mtn
+,pv.cust_line_seq_id
+,pv.event_tm
+FROM ic
+LEFT JOIN pv
+ON pv.cust_id = ic.cust_id
+AND pv.event_dt = ic.event_dt
+AND pv.acct_num = ic.acct_num
+--WHERE ic.cust_id = '227358658'
+
+UNION
+
+SEL DISTINCT  --1,498 (additional 142)
+acss.cust_id
+,acss.acct_num
+,acss.acss_trans_dt
+,pv.NETACE_USER_ID
+,pv.store_num
+,pv.mtn
+,pv.cust_line_seq_id
+,pv.event_tm
+FROM acss 
+LEFT JOIN pv
+ON acss.cust_id = pv.cust_id
+AND acss.acct_num = pv.acct_num
+AND acss.acss_trans_dt = pv.event_dt
+--WHERE acss.cust_id = '227358658'
+
+) WITH DATA
+PRIMARY INDEX ( CUST_ID, ACCT_NUM, EVENT_DT, store_num )
+ON COMMIT PRESERVE ROWS
+ ;
+ 
+ DROP TABLE comment_tbl;
+ 
+ CREATE MULTISET VOLATILE TABLE comment_tbl AS (
+ SEL DISTINCT
+ cust_id
+ ,acct_num
+ ,COMMENT_DT
+ ,vision_user_id
+ ,Cast(contact_tm AS TIME(0) Format 'HHMISS') AS comment_tm
+ ,MTN
+ ,CUST_LINE_SEQ_ID
+ ,remark_txt
+ FROM COMMENTS_DLY_V 
+ WHERE 1=1
+ AND (remark_txt LIKE '%transfer%pin%generate%' OR remark_txt LIKE '%generate%transfer%pin%')
+ AND comment_dt BETWEEN 1250801 AND 1250831
+ --AND CUST_ID = '100022752'
+ ) WITH DATA
+ PRIMARY INDEX(cust_id, acct_num, comment_dt, vision_user_id)
+ ON COMMIT PRESERVE ROWS
+ ;
+ 
+ DROP TABLE comment_tbl_1
+ 
+ CREATE MULTISET VOLATILE TABLE comment_tbl_1 AS (
+ SEL DISTINCT
+ cust_id
+ ,acct_num
+ ,COMMENT_DT
+ ,MTN
+ ,CUST_LINE_SEQ_ID
+ ,Min(VISION_USER_ID) AS VISION_USER_ID
+ ,Min(comment_tm) AS comment_tm
+ FROM comment_tbl 
+ WHERE 1=1
+ --AND CUST_ID = '100022752'
+ GROUP BY 1,2,3,4,5
+
+ ) WITH DATA
+ PRIMARY INDEX(cust_id, acct_num, comment_dt, vision_user_id)
+ ON COMMIT PRESERVE ROWS
+ ;
+ 
+ CREATE MULTISET VOLATILE TABLE comment_tbl_2 AS (
+ SEL
+ a.cust_id
+ ,a.acct_num
+ ,a.event_dt
+ ,b.vision_user_id
+ ,' ' AS store_num
+ ,b.mtn
+ ,b.cust_line_seq_id
+ ,b.comment_tm
+ ,Count(*) Over (PARTITION BY a.CUST_ID, a.ACCT_NUM, a.event_dt) AS cnt_ --when there are multiple pin transfer events, drop the account auth when line_sequ is 0
+ FROM COMBINE AS a
+INNER JOIN comment_tbl_1 AS b
+ ON a.cust_id = b.cust_id
+ AND a.acct_num = b.acct_num
+ AND a.event_dt = b.comment_dt
+ WHERE a.event_tm IS NULL
+ --AND a.cust_id ='774286617'
+ ) WITH DATA
+ PRIMARY INDEX(cust_id, acct_num, event_dt, vision_user_id)
+ ON COMMIT PRESERVE ROWS
+ ;
+  
+ CREATE MULTISET VOLATILE TABLE comment_tbl_3 AS (
+ SEL * FROM comment_tbl_2
+ WHERE cnt_>1
+ AND CUST_LINE_SEQ_ID <>'0'
+ 
+ UNION 
+ 
+ SEL * FROM comment_tbl_2
+ WHERE cnt_=1
+ ) WITH DATA
+ PRIMARY INDEX(cust_id, acct_num, event_dt, vision_user_id)
+ ON COMMIT PRESERVE ROWS
+ ;
+ 
+ DROP TABLE combine_1
+ 
+  SEL * FROM combine_1
+ WHERE cust_id ='774286617'
+ 
+ CREATE MULTISET VOLATILE TABLE combine_1 AS (
+ SEL
+ cust_id
+,acct_num
+,event_dt
+,NETACE_USER_ID
+,store_num
+,mtn
+,cust_line_seq_id
+,event_tm
+ FROM COMBINE
+ WHERE event_tm IS NOT NULL
+ --AND cust_id ='774286617'
+ 
+ UNION
+ 
+ SEL
+ cust_id
+ ,acct_num
+ ,event_dt
+ ,vision_user_id
+ ,store_num
+ ,mtn
+ ,cust_line_seq_id
+ ,comment_tm
+FROM comment_tbl_3
+--WHERE  cust_id = '774286617'
+ ) WITH DATA
+PRIMARY INDEX ( CUST_ID, ACCT_NUM, EVENT_DT, store_num )
+ON COMMIT PRESERVE ROWS
+ ; 
+ 
+ 
+ DROP TABLE pv_all;
+ 
+CREATE MULTISET VOLATILE TABLE pv_all AS (  ---prepare all account touches
+SELECT DISTINCT
+CUST_ID
+,ACCT_NUM
+,EVENT_DT
+--,mtn
+--,cust_line_seq_id
+--,store_num
+,NETACE_USER_ID 
+,Max(event_tm) AS event_tm ----when the same user has a multiple time touch account, pick the latest one
+FROM VZWEB_PRD_ALLVM.DIGITAL_PAGE_VIEW_VCG_V AS a
+WHERE 1=1
+AND (cust_id IS NOT NULL AND  cust_id <>'NA' AND cust_id <> '${account}' AND cust_id <> '${accountHash}' AND cust_id <>'0')
+AND event_dt BETWEEN 1250801 AND 1250831 
+AND NETACE_USER_ID IS NOT NULL ---to make sure there  is user associated account touch, otherwise no need to pull for analysis
+--AND cust_id = '474289329'
+GROUP BY 1,2,3,4
+)WITH DATA
+PRIMARY INDEX ( CUST_ID, ACCT_NUM, EVENT_DT, NETACE_USER_ID)
+ON COMMIT PRESERVE ROWS
+ ;
+ 
+ DROP TABLE touch_acct_emp;
+ 
+ 
+ CREATE VOLATILE MULTISET  TABLE touch_acct_emp AS (
+ SEL
+ cust_id
+ ,acct_num
+ ,event_dt
+ ,event_tm
+ ,user_acct_touch_channel
+ ,Max(NETACE_USER_ID) AS NETACE_USER_ID ---because sometime multiple user with same event_tm
+ FROM (
+ SELECT DISTINCT
+ a.CUST_ID
+,a.ACCT_NUM
+,a.EVENT_DT
+,a.event_tm
+,CASE WHEN b.DEPT_FCTN_DESC LIKE '%indirect%' THEN 'Indirect'
+ WHEN b.DEPT_DESC LIKE 'MKT-Communication Stores A%'  THEN 'Retail'
+ WHEN (b.DEPT_FCTN_DESC NOT LIKE '%indirect%' OR b.DEPT_FCTN_DESC IS NULL) AND ( b.DEPT_DESC NOT LIKE 'MKT-Communication Stores A%' OR b.DEPT_DESC IS NULL) THEN 'Other'  END AS user_acct_touch_channel
+ ,a.NETACE_USER_ID
+ FROM pv_all AS a
+ LEFT JOIN EMPLOYEE_CONTRACTOR_hist_V AS b
+ ON a.NETACE_USER_ID = b.NT_USER_ID
+ AND a.event_dt BETWEEN b.eff_dt AND b.exp_dt
+ AND b.EMP_STATUS_IND <> 'T'
+ 
+ --QUALIFY Rank() Over (PARTITION BY a.cust_id, a.acct_num, a.event_dt, user_touch_acct_channel ORDER BY event_tm DESC ) = 1
+ 
+ WHERE 1=1
+--AND cust_id = '774286617'
+) sub
+GROUP BY 1,2,3,4,5
+ )WITH DATA
+PRIMARY INDEX ( CUST_ID, ACCT_NUM, EVENT_DT,NETACE_USER_ID )
+ON COMMIT PRESERVE ROWS
+ ;
+ 
+DROP TABLE ntl_prd_qmtbls.touch_acct ;
+
+CREATE MULTISET  TABLE ntl_prd_qmtbls.touch_acct AS (
+SEL
+CUST_ID
+,ACCT_NUM
+,EVENT_DT AS pin_port_out_dt
+,pin_port_out_tm
+,user_port_out_pin
+,acct_touch_tm
+,user_acct_touch
+,Rank() Over (PARTITION BY cust_id, acct_num, event_dt,user_acct_touch_channel ORDER BY Abs(time_diff)) AS acct_touch_seq_order
+--,Abs(time_diff) AS time_diff
+,user_acct_touch_channel
+FROM (
+SEL DISTINCT
+a.CUST_ID
+,a.ACCT_NUM
+,a.EVENT_DT
+,a.NETACE_USER_ID AS user_port_out_pin
+,b.NETACE_USER_ID AS user_acct_touch
+,Cast(a.event_tm AS  Format 'HH:MI') (VARCHAR(5)) AS pin_port_out_tm
+,Cast(b.event_tm AS  Format 'HH:MI') (VARCHAR(5)) AS acct_touch_tm
+, (a.event_tm - b.event_tm) MINUTE(4) AS time_diff
+,b.user_acct_touch_channel
+FROM combine_1 AS a
+LEFT JOIN touch_acct_emp AS b
+ON a.cust_id = b.cust_id
+AND a.acct_num = b.acct_num
+AND a.event_dt = b.event_dt
+WHERE Coalesce(a.NETACE_USER_ID, b.NETACE_USER_ID) IS NOT NULL
+--AND a.cust_id = '226362058'
+) sub
+--GROUP BY 1,2,3,4,5,6,7,8,9
+)WITH DATA 
+PRIMARY INDEX ( CUST_ID, ACCT_NUM, pin_port_out_dt )
+ ;
+ 
+DROP TABLE ntl_prd_qmtbls.non_retail_port_out_pin;
+
+CREATE MULTISET TABLE ntl_prd_qmtbls.non_retail_port_out_pin AS (
+SEL DISTINCT
+CUST_ID
+,ACCT_NUM
+,pin_port_out_dt
+,user_port_out_pin
+,user_acct_touch
+,user_acct_touch_channel
+FROM  ntl_prd_qmtbls.touch_acct
+WHERE acct_touch_seq_order = 1
+) WITH DATA 
+PRIMARY INDEX ( CUST_ID, ACCT_NUM, pin_port_out_dt ,user_acct_touch )
+ ;
+
+ 
+ --------------------------------------------
+SEL
+a.*
+FROM (
+SEL
+cust_id
+,pin_port_out_dt
+,user_touch_acct_channel
+
+,Count(DISTINCT user_acct_touch ) AS cnt_
+FROM ntl_prd_qmtbls.non_retail_port_out_pin
+GROUP BY 1,2,3,4
+) a
+WHERE a.cnt_ >1
+
+
+SEL
+*
+FROM  ntl_prd_qmtbls.non_retail_port_out_pin
+WHERE user_touch_acct_channel = 'indirect'
+
+
+SEL 
+cust_id
+,pin_port_out_dt
+,user_touch_acct_channel
+,Count(*)
+FROM ntl_prd_qmtbls.touch_acct 
+WHERE user_touch_acct_channel = 'indirect'
+GROUP BY 1,2,3
+
+
+SEL * FROM ntl_prd_qmtbls.touch_acct 
+WHERE CUST_ID IN (
+'426218644'
+)
+
+SEL
+*
+FROM  ntl_prd_qmtbls.non_retail_port_out_pin
+WHERE 1=1
+AND user_touch_acct_channel = 'indirect'
+AND CUST_ID ='205478508' 
+
+
+
+
+
+
+
